@@ -1,0 +1,9 @@
+klang_motherboard-backups
+production
+*.dcm
+*.net
+*.erc
+*.drc
+*.cmp
+*-cache.lib
+fp-info-cache

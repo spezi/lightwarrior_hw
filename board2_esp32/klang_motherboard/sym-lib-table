@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "syms2024")(type "KiCad")(uri "/home/xandy/Pro2/kicad_libs/syms2024.kicad_sym")(options "")(descr ""))
+)
