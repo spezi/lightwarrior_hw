@@ -3,46 +3,51 @@
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <string.h>
 
 #include <NeoPixelBus.h>
-#include <NeoPixelAnimator.h>
-//const uint16_t PixelCount = 300;
-const uint16_t PixelCount = 10;
+
+#define PIXEL_COUNT 900
 
 const uint8_t PixelPin = 1; 
-NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip(PixelCount, PixelPin); //WS2812B
+NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip(PIXEL_COUNT, PixelPin); //WS2812B
 
 
 #define TPM2_PORT 65506
-#define MAX_BUFFER_TPM2 920
+#define MAX_BUFFER_TPM2 1600 // bigger than wifi mtu, should be enough
 #define TPM2_START 6
+#define TPM2_HEADER_SIZE 6 // TPM2 header size in bytes
 
 //////// STRIPE SELECTION CHANGE UNIVERSES AND ADJUST IP TO 10.0.0.<STRIPESELECT>
+// adjusted via dip switches on esp32 boards
 uint8_t STRIPESELECT = 0;
 
 uint8_t tpm2Packet[MAX_BUFFER_TPM2];
 uint8_t packetSize;
-uint8_t* data; 
+
+// TPM2 frame tracking
+uint16_t lastFrameNumber = 0;
+uint16_t pixelOffset = 0; // Byte offset within the pixel data
 
 // Network Settings
 //char ssid[] = "eyelan";  
 //char pass[] = "";    
-char ssid[] = "DEV";  
-char pass[] = "DEV";    
+char ssid[] = "reborntmp";  
+char pass[] = "reborntmp"; 
 // Network Settings
 
 
 WiFiUDP udptpm2;
 
 
-uint8_t net = 0;
-uint8_t subnet = 0;
-
-uint32_t unifullSize;
-
 void setup()
 {
-  // Read DIP switch pins to determine STRIPESELECT value
+  Serial.begin(115200);
+    while (!Serial) {
+    delay(10);
+  }
+
+  Serial.println("boot");  // Read DIP switch pins to determine STRIPESELECT value
   pinMode(2, INPUT_PULLDOWN); 
   pinMode(3, INPUT_PULLDOWN);
   pinMode(4, INPUT_PULLDOWN);
@@ -62,11 +67,10 @@ void setup()
   if (digitalRead(4) == LOW) STRIPESELECT |= (1 << 4);
   // if (digitalRead(3) == LOW) STRIPESELECT |= (1 << 6); // not usable as pulldown on c3 supermini
   // if (digitalRead(2) == LOW) STRIPESELECT |= (1 << 7); // not usable as pulldown on c3 supermini
-  STRIPESELECT=+ip_offset;
+  STRIPESELECT+=ip_offset;
 
-  Serial.begin(115200);
-  Serial.println("boot");
-  delay(200*STRIPESELECT); // random Delay for connection
+
+  //delay(200*STRIPESELECT); // random Delay for connection
 
   //adjust to selected Stripe
   IPAddress ip(10, 0, 0, STRIPESELECT);
@@ -77,10 +81,12 @@ void setup()
   WiFi.begin(ssid, pass);
   //WiFi.begin(ssid);
   WiFi.mode(WIFI_STA);
-  
+  Serial.print("waiting for wifi");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(STRIPESELECT*200 + random(10,1000));
+    Serial.print("w");
+    delay(100);
   }
+  Serial.println("wifi connected");
   
   WiFi.persistent(true);
   WiFi.setAutoReconnect(true);
@@ -91,9 +97,8 @@ void setup()
   strip.Begin();
 
   //let first pixel glow white to indicate connection
-  strip.SetPixelColor(0, RgbColor (100, 100, 100));  
+  strip.SetPixelColor(0, RgbColor (100, 100, 100));
   strip.Show();
-
   
   
   
@@ -151,24 +156,74 @@ void setup()
 }
 
 void sendStripeTpm2() {
-           udptpm2.read(tpm2Packet, MAX_BUFFER_TPM2);
-           data = tpm2Packet + TPM2_START;
-             for (int i = 0; i < PixelCount; i++)
-              {
-                strip.SetPixelColor(i, RgbColor (data[(i * 3)], data[(i * 3 + 1)], data[(i * 3 + 2)]));  
-              }   
-                strip.Show();
+  packetSize = udptpm2.read(tpm2Packet, MAX_BUFFER_TPM2);
+  if (packetSize < (TPM2_HEADER_SIZE+1) ) {
+    return; // No data received
   }
-  
+
+
+  uint8_t startMark = tpm2Packet[0];
+  uint8_t packetType = tpm2Packet[1];
+  uint16_t frameSize = (tpm2Packet[2] << 8) | tpm2Packet[3];
+  uint8_t frameNumber = tpm2Packet[4];
+  uint8_t framesTotal = tpm2Packet[5];
+  Serial.println("PKG: "+"sz"+ String(packetSize) + "sm"+ String(startMark) + " pt" +String(packetType) + " fs"+ String(frameSize) + " fn"+ String(frameNumber) + " ft"+ String(framesTotal));
+  if(startMark != 0x9C){
+    Serial.println("Ignore packet with wrong magic header");
+    return;
+  }
+  if (packetType != 0xDA) {
+    Serial.println("Discarding non data frame");
+    return;
+  }
+    if (frameNumber == 1) {
+      Serial.println("Frame 0");
+      lastFrameNumber = 0;
+      pixelOffset = 0;
+    }
+    else if (frameNumber < lastFrameNumber) {
+      Serial.println("Discarding earlier non 0 frame");
+      return;
+    }
+    else if (frameNumber > (lastFrameNumber + 1)){
+      Serial.println("Detected dropped frame(s)");
+      return;
+    }
+
+
+
+    lastFrameNumber = frameNumber;
+
+    uint8_t* pixelData = strip.Pixels();
+
+    // Calculate how many bytes we can process from this packet
+    uint16_t dataStart = TPM2_HEADER_SIZE;
+    uint16_t dataEnd = frameSize;
+
+    // Make sure we don't exceed the pixel data size
+    uint16_t maxPixelBytes = PIXEL_COUNT * 3;
+    if (pixelOffset + (dataEnd - dataStart) > maxPixelBytes) {
+      dataEnd = maxPixelBytes - pixelOffset + dataStart;
+    }
+
+    // Copy data directly to the pixel buffer
+    if (dataEnd > dataStart) {
+      memcpy(pixelData + pixelOffset, tpm2Packet + dataStart, dataEnd - dataStart);
+      pixelOffset += (dataEnd - dataStart);
+    }
+
+    if(frameNumber==framesTotal){
+      strip.Dirty();
+      strip.Show();
+      Serial.println("Frame processed. Pixel offset: " + String(pixelOffset));
+    }
+}
 
 void loop()
-{ 
-  if (udptpm2.parsePacket()) { 
+{
+  while (udptpm2.parsePacket()) {
     sendStripeTpm2();
-   }
+  }
 
-  /////////OTA Stuff
   ArduinoOTA.handle();
-  ////////
-  
 }
