@@ -155,7 +155,7 @@ void setup()
   
 }
 
-void sendStripeTpm2() {
+void parseTPM2() {
   packetSize = udptpm2.read(tpm2Packet, MAX_BUFFER_TPM2);
   if (packetSize < (TPM2_HEADER_SIZE+1) ) {
     return; // No data received
@@ -167,26 +167,38 @@ void sendStripeTpm2() {
   uint16_t frameSize = (tpm2Packet[2] << 8) | tpm2Packet[3];
   uint8_t frameNumber = tpm2Packet[4];
   uint8_t framesTotal = tpm2Packet[5];
-  Serial.println("PKG: "+"sz"+ String(packetSize) + "sm"+ String(startMark) + " pt" +String(packetType) + " fs"+ String(frameSize) + " fn"+ String(frameNumber) + " ft"+ String(framesTotal));
+#ifdef DEBUG_TPM2
+  Serial.println("PKG: "+String("sz")+ String(packetSize) + "sm"+ String(startMark) + " pt" +String(packetType) + " fs"+ String(frameSize) + " fn"+ String(frameNumber) + " ft"+ String(framesTotal));
+#endif
   if(startMark != 0x9C){
+#ifdef DEBUG_TPM2
     Serial.println("Ignore packet with wrong magic header");
+#endif
     return;
   }
   if (packetType != 0xDA) {
+#ifdef DEBUG_TPM2
     Serial.println("Discarding non data frame");
+#endif
     return;
   }
     if (frameNumber == 1) {
+#ifdef DEBUG_TPM2
       Serial.println("Frame 0");
+#endif
       lastFrameNumber = 0;
       pixelOffset = 0;
     }
     else if (frameNumber < lastFrameNumber) {
+#ifdef DEBUG_TPM2
       Serial.println("Discarding earlier non 0 frame");
+#endif
       return;
     }
     else if (frameNumber > (lastFrameNumber + 1)){
+#ifdef DEBUG_TPM2
       Serial.println("Detected dropped frame(s)");
+#endif
       return;
     }
 
@@ -196,15 +208,17 @@ void sendStripeTpm2() {
 
     uint8_t* pixelData = strip.Pixels();
 
-    // Calculate how many bytes we can process from this packet
     uint16_t dataStart = TPM2_HEADER_SIZE;
-    uint16_t dataEnd = frameSize;
+    uint16_t dataEnd = min(frameSize+TPM2_HEADER_SIZE, packetSize-1);
 
     // Make sure we don't exceed the pixel data size
     uint16_t maxPixelBytes = PIXEL_COUNT * 3;
     if (pixelOffset + (dataEnd - dataStart) > maxPixelBytes) {
       dataEnd = maxPixelBytes - pixelOffset + dataStart;
     }
+#ifdef DEBUG_TPM2
+    Serial.println("Pixel data dims: ds" + String(dataStart) + "  de" + String(dataEnd));
+#endif
 
     // Copy data directly to the pixel buffer
     if (dataEnd > dataStart) {
@@ -215,14 +229,16 @@ void sendStripeTpm2() {
     if(frameNumber==framesTotal){
       strip.Dirty();
       strip.Show();
+#ifdef DEBUG_TPM2
       Serial.println("Frame processed. Pixel offset: " + String(pixelOffset));
+#endif
     }
 }
 
 void loop()
 {
   while (udptpm2.parsePacket()) {
-    sendStripeTpm2();
+    parseTPM2();
   }
 
   ArduinoOTA.handle();
