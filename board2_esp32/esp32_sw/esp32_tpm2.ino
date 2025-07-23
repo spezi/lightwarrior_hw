@@ -16,8 +16,8 @@
 //IPAddress statsDestination(10, 42, 0, 1);
 IPAddress statsDestination(10, 1, 20, 106);
 
-//#define PIXEL_COUNT 1386
-#define PIXEL_COUNT 800
+#define PIXEL_COUNT 1386
+//#define PIXEL_COUNT 800
 
 const uint8_t PixelPin = 1; 
 NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip(PIXEL_COUNT, PixelPin); //WS2812B
@@ -43,6 +43,9 @@ uint16_t pixelOffset = 0; // Byte offset within the pixel data
 //char ssid[] = "eyelan";  
 //char pass[] = "";
 
+char ssid[] = "backspace IoT";   
+char pass[] = "InternetOfShit!"; 
+
 //char ssid[] = "reborntmp";   
 //char pass[] = "reborntmp"; 
 // Network Settings
@@ -59,7 +62,12 @@ unsigned long displayedFrames = 0;
 unsigned long processedPackets = 0;
 unsigned long validPackets = 0;
 unsigned long lastStatsSend = 0;
+int32_t wifiRSSI = 0;
 
+// Loop timing statistics
+unsigned long minLoopTime = ULONG_MAX;
+unsigned long maxLoopTime = 0;
+unsigned long lastLoopStart = 0;
 
 void setup()
 {
@@ -279,12 +287,28 @@ void parseTPM2() {
     }
 }
 int last_send = 0;
+void updateWiFiStats() {
+  auto wifiStatus = WiFi.status();
+  if (wifiStatus == WL_CONNECTED) {
+    wifiRSSI = WiFi.RSSI();
+  } else {
+    wifiRSSI = 0;
+  }
+}
+
 void sendStats() {
+  // Update WiFi stats before sending
+  updateWiFiStats();
+
   // Create a buffer for the stats message
   char statsMessage[1000];
+
+
   snprintf(statsMessage, sizeof(statsMessage),
-           "v1 dropped:%lu discarded:%lu invalid:%lu displayed:%lu processed:%lu valid:%lu\n",
-           droppedPackets, discardedPackets, invalidPackets, displayedFrames, processedPackets, validPackets);
+           "v3 dropped:%lu discarded:%lu invalid:%lu displayed:%lu processed:%lu valid:%lu "
+           "wifi_rssi:%ld min_loop:%lu max_loop:%lu\n",
+           droppedPackets, discardedPackets, invalidPackets, displayedFrames, processedPackets, validPackets,
+           wifiRSSI, minLoopTime, maxLoopTime);
 
   // Send the stats via UDP
   udpStats.beginPacket(statsDestination, STATS_PORT);
@@ -294,6 +318,7 @@ void sendStats() {
 
 void loop()
 {
+  unsigned long loopStart = millis();
 
   // if(data_ready && strip.CanShow()&&((millis()-last_send)>100)){
   // if(data_ready && ((millis()-last_send)>100)){
@@ -306,12 +331,20 @@ void loop()
 
   // Send stats every STATS_INTERVAL milliseconds
   if (millis() - lastStatsSend >= STATS_INTERVAL) {
-    lastStatsSend = millis();
     sendStats();
+    lastStatsSend = millis();
+    // Reset min/max loop times after sending stats
+    minLoopTime = ULONG_MAX;
+    maxLoopTime = 0;
   }
 
   while (udptpm2.parsePacket()) {
     parseTPM2();
   }
   ArduinoOTA.handle();
+
+  // Calculate loop time
+  unsigned long loopTime = millis() - loopStart;
+  if (loopTime < minLoopTime) minLoopTime = loopTime;
+  if (loopTime > maxLoopTime) maxLoopTime = loopTime;
 }
